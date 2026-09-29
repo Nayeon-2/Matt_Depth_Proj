@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env/
+RVM_proj/
+.ipynb_checkpoints/
+
+# Model weights (download separately, see README)
+*.pth
+*.pt
+*.onnx
+*.torchscript
+
+# Media / installers
+*.mp4
+*.exe
+test_videos/
+
+# Duplicate upstream copies bundled inside RobustVideoMatting
+**/RobustVideoMatting-master/
+
+# Local state / logs
+logs/
+cache/
+*.log
+ground_calib.json
+
+# Backups made by coding agents
+.codex_backup_*/
+.claude_backup_*/

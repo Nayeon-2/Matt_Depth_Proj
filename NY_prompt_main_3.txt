@@ -1,0 +1,29 @@
+python rvm_main.py ^
+  --ffmpeg-in decklink ^
+  --ffmpeg-bin "D:\body tracking\FFmpeg\bin\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (1)" ^
+  --force-size 1920x1080 ^
+  --dl-out 1 ^
+  --dl-out-device "DeckLink Quad (2)" ^
+  --dl-out-scale 1920x1080 ^
+  --no-preview ^
+  --dl-out-format 1080p5994 ^
+  --dl-out-fps 60000/1001 ^
+  --pencil 1 ^
+  --pencil-palette rainbow ^
+  --pencil-bands 10 ^
+  --pencil-repeat 3 ^
+  --pencil-axis around ^
+  --pencil-width 12 ^
+  --pencil-jitter 2 ^
+  --pencil-rough 3 ^
+  --pencil-opacity 3 ^
+  --pencil-gap-len -6 ^
+  --pencil-sweep-axis y ^
+  --pencil-sweep-soft-px 24 ^
+  --pencil-sweep-ms 1200 ^
+  --multi-mode center ^
+  --yolo 1 ^
+  --yolo-weights "D:\TW\models\yolov8n-seg.pt" ^
+  --yolo-img 640 ^
+  --yolo-conf 0.5

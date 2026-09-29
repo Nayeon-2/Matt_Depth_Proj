@@ -1,0 +1,47 @@
+python rvm_main.py ^
+  --ffmpeg-in decklink ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (1)" ^
+  --force-size 1920x1080 ^
+  --dl-out 1 ^
+  --dl-out-device "DeckLink Quad (2)" ^
+  --dl-out-scale 1920x1080 ^
+  --dl-out-format 1080p5994 --dl-out-fps 60000/1001 ^
+  --pencil 1 ^
+  --pencil-palette rainbow --pencil-bands 10 --pencil-repeat 3 --pencil-axis around ^
+  --pencil-width 12 --pencil-jitter 2 --pencil-rough 3 --pencil-opacity 3 --pencil-gap-len -6 ^
+  --pencil-sweep-axis y --pencil-sweep-soft-px 24 --pencil-sweep-ms 1200 ^
+  --multi-mode "center" ^
+  --yolo 1^
+  --yolo-weights "D:\TW\models\yolov8n.pt" ^
+  --yolo-img 640 ^
+  --yolo-conf 0.5
+
+------픽셀라인
+  --ripple 1 --ripple-on-bg 1 --ripple-blend add ^
+  --ripple-count 3 ^ --ripple-width 7 ^ --ripple-spacing 20 ^
+  --ripple-speed 30 ^ --ripple-start 2 ^ --ripple-color "100,100,100;100,100,100;100,100,100"
+
+-------크레파스
+  --pencil 1 ^
+  --pencil-palette rainbow --pencil-bands 10 --pencil-repeat 3 --pencil-axis around ^
+  --pencil-width 12 --pencil-jitter 2 --pencil-rough 3 --pencil-opacity 3 --pencil-gap-len -6 ^
+  --pencil-sweep-axis y --pencil-sweep-soft-px 24 --pencil-sweep-ms 1200 ^
+  --multi-mode "center" 
+
+-------에너지
+  --energy 1 --energy-color "0,80,200" --energy-blend normal ^
+  --energy-width 40 --energy-blur 30 --energy-gain 8 --energy-on-bg 1 ^
+  --energy-color-lerp-ms 800
+
+
+
+python rvm_main.py ^
+  --ffmpeg-in dshow ^
+  --ffmpeg-bin "D:\body tracking\FFmpeg\bin\ffmpeg.exe" ^
+  --dshow-name "OBS Virtual Camera" ^
+  --force-fps 30 ^
+  --force-size 1920x1080 ^
+  --raw-format bgr24
+
+

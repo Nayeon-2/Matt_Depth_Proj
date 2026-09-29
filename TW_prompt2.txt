@@ -1,0 +1,64 @@
+python rvm_spout_fin.py ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (2)" ^
+  --force-size 1920x1080 ^
+  --raw-format uyvy422 ^
+  --weights "D:\TW\RVM_Depth_Project\rvm_mobilenetv3.pth" ^
+  --tx-delay-frames 3 ^            :: 시작을 3프레임로 요청 → 자동으로 ms 환산
+  --tx-delay-max 120 ^
+  --fps-cap 29.97 ^                :: 기준 FPS 고정(권장). 없으면 측정 FPS 사용
+  --spout-name-alpha "RT_RVM_ALPHA" ^
+  --stats 1 --enable-cmd 1 ^
+  --cuda-index 0 --long 640
+
+python rvm_spout_fin.py ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (3)" ^
+  --force-size 1920x1080 ^
+  --raw-format uyvy422 ^
+  --weights "D:\TW\RVM_Depth_Project\rvm_mobilenetv3.pth" ^
+  --tx-delay-frames 1 ^
+  --spout-name-alpha "RT_RVM_ALPHA" ^
+  --stats 1 --enable-cmd 1 ^
+  --cuda-index 0 --long 872
+
+python rvm_spout_fin.py ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (3)" ^
+  --force-size 1920x1080 ^
+  --raw-format uyvy422 ^
+  --weights "D:\TW\RVM_Depth_Project\rvm_mobilenetv3.pth" ^
+  --tx-delay-frames 1 ^
+  --spout-name-alpha "RT_RVM_ALPHA" ^
+  --spout-name-video "RT_RVM_VIDEO" ^
+  --stats 1 --enable-cmd 1 ^
+  --cuda-index 0 --long 872
+
+색일치
+python rvm_spout_fin.py ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (1)" ^
+  --force-size 1920x1080 ^
+  --raw-format bgra ^
+  --weights "D:\TW\RVM_Depth_Project\rvm_mobilenetv3.pth" ^
+  --spout-name-alpha "RT_RVM_ALPHA" ^
+  --spout-name-video "RT_RVM_VIDEO" ^
+  --stats 1 --enable-cmd 1 ^
+  --fps-cap 29.97  ^
+  --cuda-index 0 ^
+  --long 872
+
+python rvm_spout_fin_BU.py ^
+  --ffmpeg-bin "D:\TW\FFmpeg\ffmpeg.exe" ^
+  --decklink-device "DeckLink Quad (1)" ^
+  --force-size 1920x1080 ^
+  --raw-format bgra ^
+  --weights "D:\TW\RVM_Depth_Project\rvm_mobilenetv3.pth" ^
+  --spout-name-alpha "RT_RVM_ALPHA" ^
+  --spout-name-video "RT_RVM_VIDEO" ^
+  --spout-framesync 0 ^
+  --tx-delay-frames 0 ^
+  --tx-delay-ms 0 ^
+  --alpha-ema 0 ^
+  --long 1024 ^
+  --stats 1
