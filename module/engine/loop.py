@@ -15,7 +15,7 @@ from ..effects.ripple_lines_1 import draw_moving_outlines
 from ..effects.edge_pencil import draw_pencil_outline
 from ..effects.energy import apply_energy
 from ..effects.per_person_core import parse_palette, connected_instances_from_alpha
-from .person_distance import encode_distance
+from .person_distance import encode_distance, encode_logo, chest_anchor
 
 from ..models.deepsort.deepsort_tracker import DeepSortTracker
 
@@ -284,6 +284,8 @@ def run_loop(
     bg_margin: int = 15,        # clean 모드에서 사람 주변을 추가로 제외할 여유(px)
     pose_worker=None,           # PoseWorker (사람 거리 추정용) 또는 None
     distance_estimator=None,    # PersonDistanceEstimator 또는 None → 거리값을 matte 좌상단 픽셀에 인코딩
+    logo_duration: float = 4.0, # L 키 로고 연출 길이(초): 뚫고 나옴 → 머묾 → 사라짐
+    logo_every: float = 0.0,    # >0 이면 이 간격(초)마다 로고 연출을 자동 실행 (테스트/자동 반복용)
     no_preview: bool = False,
     preview_scale: float = 0.5,
     show_depth: bool = False,
@@ -328,6 +330,9 @@ def run_loop(
     bg_frames = 0
     bg_reset_all = False
     person_z, person_z_valid, last_pose_ts = 0.0, False, 0.0
+    logo_t0 = None                 # L 키를 누른 시각 (로고 연출 시작)
+    logo_anchor = (0.5, 0.55)      # 사람 가슴의 화면 위치 (0..1)
+    logo_last_auto = time.perf_counter()
 
     # Tracker
     tracker = DeepSortTracker(
@@ -376,6 +381,9 @@ def run_loop(
                 kps = st["kps"][0] if st.get("ok") and st.get("kps") is not None else None
                 person_z, person_z_valid = distance_estimator.update(
                     kps, st.get("vis") if kps is not None else None, st.get("bbox"), now=last_pose_ts)
+                a = chest_anchor(kps, st.get("vis") if kps is not None else None, W, H)
+                if a is not None:   # light smoothing so the logo path does not jitter
+                    logo_anchor = (logo_anchor[0] * 0.6 + a[0] * 0.4, logo_anchor[1] * 0.6 + a[1] * 0.4)
 
         # depth 비동기 갱신
         if use_depth and depth_worker is not None:
@@ -862,6 +870,13 @@ def run_loop(
             matte_np = matte_cpu_buf.numpy().copy()
             if distance_estimator is not None:
                 encode_distance(matte_np, person_z, person_z_valid)
+                if logo_every > 0 and (time.perf_counter() - logo_last_auto) >= float(logo_every):
+                    logo_last_auto = logo_t0 = time.perf_counter()
+                logo_phase = ((time.perf_counter() - logo_t0) / float(logo_duration)) if logo_t0 is not None else 1.0
+                logo_active = logo_phase < 1.0
+                if not logo_active:
+                    logo_t0 = None
+                encode_logo(matte_np, logo_phase if logo_active else 0.0, logo_active, logo_anchor)
             matte_sender.submit(matte_np)
 
         # 배경 전송: clean 모드는 사람(+여유 영역)이 없는 픽셀만 천천히 갱신해 사람 없는 배경을 만든다.
@@ -985,6 +1000,9 @@ def run_loop(
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
+            if key == ord('l') and distance_estimator is not None:
+                logo_t0 = time.perf_counter()
+                print("[INFO] Logo: play")
             if key == ord('b') and bg_sender is not None:
                 # 사람이 없을 때 누르면 현재 프레임 전체를 배경으로 다시 잡는다.
                 bg_plate = None

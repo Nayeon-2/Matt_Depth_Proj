@@ -241,3 +241,41 @@ def encode_distance(frame_bgra: np.ndarray, z_m: float, valid: bool):
     sig[..., 1] = 255
     sig[..., 2] = 0
     sig[..., 3] = 0
+
+
+def _put16(frame_bgra: np.ndarray, block: int, value01: float, flag: bool):
+    v = int(round(min(max(value01, 0.0), 1.0) * 65535))
+    blk = frame_bgra[:CODE_BLOCK, block * CODE_BLOCK:(block + 1) * CODE_BLOCK]
+    blk[..., 0] = 255 if flag else 0    # B: flag
+    blk[..., 1] = v & 0xFF              # G: low byte
+    blk[..., 2] = (v >> 8) & 0xFF       # R: high byte
+    blk[..., 3] = 0                     # A: keep invisible
+
+
+def encode_logo(frame_bgra: np.ndarray, phase: float, active: bool, anchor_xy: tuple[float, float]):
+    """Logo trigger data next to the distance code (all invisible, alpha 0).
+
+    Block 2 (x 8..11):  R,G = animation phase 0..1 (16 bit), B = 255 while the logo is playing.
+    Block 3 (x 12..15): R,G = anchor x in 0..1 of the frame width (person's chest).
+    Block 4 (x 16..19): R,G = anchor y in 0..1 of the frame height (from the top).
+    """
+    _put16(frame_bgra, 2, phase, active)
+    _put16(frame_bgra, 3, anchor_xy[0], True)
+    _put16(frame_bgra, 4, anchor_xy[1], True)
+
+
+def chest_anchor(kps: Optional[np.ndarray], conf: Optional[np.ndarray], width: int, height: int,
+                 kp_conf: float = 0.5) -> Optional[tuple[float, float]]:
+    """Normalized screen point at the middle of the torso (shoulders/hips), or None."""
+    if kps is None or conf is None:
+        return None
+    k = np.asarray(kps, dtype=np.float32).reshape(-1, 2)
+    c = np.asarray(conf, dtype=np.float32).reshape(-1)
+    if k.shape[0] < 17 or c[L_SH] < kp_conf or c[R_SH] < kp_conf:
+        return None
+    sh = (k[L_SH] + k[R_SH]) / 2
+    if c[L_HIP] > kp_conf and c[R_HIP] > kp_conf:
+        p = sh * 0.6 + ((k[L_HIP] + k[R_HIP]) / 2) * 0.4
+    else:
+        p = sh + np.array([0.0, float(np.linalg.norm(k[L_SH] - k[R_SH])) * 0.6], dtype=np.float32)
+    return float(p[0] / width), float(p[1] / height)

@@ -596,6 +596,8 @@ def run_virtualcam(**kwargs):
             bg_margin=int(kwargs.get("spout_bg_margin", 15)),
             pose_worker=pose_worker,
             distance_estimator=distance_estimator,
+            logo_duration=float(kwargs.get("logo_duration", 4.0)),
+            logo_every=float(kwargs.get("logo_every", 0.0)),
             no_preview=no_preview,
             preview_scale=preview_scale,
             show_depth=show_depth,

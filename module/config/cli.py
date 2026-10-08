@@ -90,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--dist-calib", type=str, default="ground_calib.json", help="자동 보정 결과 저장 파일")
     g.add_argument("--dist-pose-model", type=str, default="yolov8n-pose.pt", help="YOLO pose 가중치")
     g.add_argument("--dist-pose-imgsz", type=int, default=640, help="YOLO pose 추론 해상도")
+    g.add_argument("--logo-duration", type=float, default=4.0, help="L 키 로고 연출 길이(초)")
+    g.add_argument("--logo-every", type=float, default=0.0, help="이 간격(초)마다 로고 연출 자동 실행 (0=끔)")
 
     # Depth (MiDaS)
     g = p.add_argument_group("Depth (MiDaS)")
@@ -337,6 +339,8 @@ def args_to_run_kwargs(args) -> dict:
         dist_calib=args.dist_calib,
         dist_pose_model=args.dist_pose_model,
         dist_pose_imgsz=args.dist_pose_imgsz,
+        logo_duration=args.logo_duration,
+        logo_every=args.logo_every,
         use_depth=bool(args.use_depth),
         depth_model_name=args.depth_model_name,
         depth_long=args.depth_long,
