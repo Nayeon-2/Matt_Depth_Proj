@@ -26,6 +26,23 @@ git clone --recurse-submodules <이 저장소 주소>
 - `RVM_OUTPUT`: 사람 누끼(RGBA). 좌상단 8x4 픽셀(알파 0)에 사람 거리(mm)가 인코딩됨
   (`module/engine/person_distance.py`)
 - `RVM_BG`: 배경 (`--spout-bg-mode raw|clean`)
+- `RVM_TARGET` (`--spout-target 1`): 효과를 줄 한 사람의 마스크. R=타겟 알파,
+  G=다른 사람 알파, B=타겟 영역(`--target-grow` px만큼 넓힘), A=255. 타겟이 없으면 R=B=0.
+  타겟 기준은 `--target-mode left|right|center|largest|nearest`, 프리뷰 창에서
+  T=다음 사람, Y=기준으로 다시 고르기 (`module/engine/target_person.py`)
+
+### 실행 중 키
+
+프리뷰 창과 cmd 창(콘솔) 어느 쪽에서 눌러도 같은 동작을 합니다. 프리뷰를 끄면
+(`--no-preview`) cmd 창을 클릭해 활성화한 뒤 누르세요.
+
+| 동작 | 프리뷰 창 | cmd 창 |
+|---|---|---|
+| 타겟: 다음 사람 | T | T |
+| 타겟: 기준으로 다시 고르기 | Y | Y |
+| 로고 연출 | L | L |
+| 배경(clean) 다시 잡기 | B | R (cmd 창의 B는 연필 효과 토글) |
+| 종료 | Q | Q |
 
 Unreal 프로젝트(Matt_test)의 `MI_RVM_Person` 머티리얼이 거리를 읽어 사람 판을
 카메라 방향으로 앞뒤로 이동시킵니다.

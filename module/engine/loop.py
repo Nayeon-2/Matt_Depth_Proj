@@ -1,6 +1,7 @@
 # ====================== run_loop (Y-band only, no beam) ======================
 from __future__ import annotations
 import cv2, torch, numpy as np, time
+import queue
 import torch.nn.functional as F
 import math
 
@@ -18,6 +19,15 @@ from ..effects.per_person_core import parse_palette, connected_instances_from_al
 from .person_distance import encode_distance, encode_logo, chest_anchor
 
 from ..models.deepsort.deepsort_tracker import DeepSortTracker
+
+# 프리뷰 창 키 → 런타임 명령 (콘솔 핫키도 같은 명령을 console_cmds 큐로 보낸다)
+PREVIEW_KEY_CMDS = {
+    ord('q'): "quit",
+    ord('l'): "logo",
+    ord('b'): "bg_reset",
+    ord('t'): "target_next",
+    ord('y'): "target_reset",
+}
 
 # --- add: small helpers for energy ---
 def parse_rgb(c, device=None, dtype=torch.float32):
@@ -284,6 +294,10 @@ def run_loop(
     bg_margin: int = 15,        # clean 모드에서 사람 주변을 추가로 제외할 여유(px)
     pose_worker=None,           # PoseWorker (사람 거리 추정용) 또는 None
     distance_estimator=None,    # PersonDistanceEstimator 또는 None → 거리값을 matte 좌상단 픽셀에 인코딩
+    seg_worker=None,            # YoloSegWorker (사람별 인스턴스 마스크) 또는 None
+    target_selector=None,       # TargetPersonSelector (효과를 줄 한 사람 선택) 또는 None
+    target_sender=None,         # 타겟 마스크(BGRA: B=타겟 영역, G=다른 사람 알파, R=타겟 알파)를 받는 Sender 또는 None
+    console_cmds=None,          # queue.Queue: 콘솔 핫키가 넣는 명령("quit", "logo", "bg_reset", "target_next", "target_reset")
     logo_duration: float = 4.0, # L 키 로고 연출 길이(초): 뚫고 나옴 → 머묾 → 사라짐
     logo_every: float = 0.0,    # >0 이면 이 간격(초)마다 로고 연출을 자동 실행 (테스트/자동 반복용)
     no_preview: bool = False,
@@ -324,6 +338,8 @@ def run_loop(
                      if matte_sender is not None else None)
     bg_cpu_buf = (torch.empty((H, W, 3), dtype=torch.uint8, pin_memory=use_cuda)
                   if bg_sender is not None else None)
+    target_cpu_buf = (torch.empty((H, W, 4), dtype=torch.uint8, pin_memory=use_cuda)
+                      if target_sender is not None else None)
     bg_plate = None   # clean 모드 배경 누적 버퍼 [3,H,W] RGB
     bg_seen = None    # 한 번이라도 사람 없이 보인 픽셀 [1,H,W] bool
     bg_fill = None    # 아직 못 본 영역을 채울 인페인팅 결과 [3,H,W]
@@ -333,6 +349,7 @@ def run_loop(
     logo_t0 = None                 # L 키를 누른 시각 (로고 연출 시작)
     logo_anchor = (0.5, 0.55)      # 사람 가슴의 화면 위치 (0..1)
     logo_last_auto = time.perf_counter()
+    pending_cmds: list[str] = []   # 이번 프레임에 처리할 런타임 명령
 
     # Tracker
     tracker = DeepSortTracker(
@@ -384,6 +401,10 @@ def run_loop(
                 a = chest_anchor(kps, st.get("vis") if kps is not None else None, W, H)
                 if a is not None:   # light smoothing so the logo path does not jitter
                     logo_anchor = (logo_anchor[0] * 0.6 + a[0] * 0.4, logo_anchor[1] * 0.6 + a[1] * 0.4)
+
+        # 타겟 선택: YOLO-seg 워커에 최신 프레임 공급 (결과는 알파 계산 뒤에 사용)
+        if seg_worker is not None:
+            seg_worker.submit(frame)
 
         # depth 비동기 갱신
         if use_depth and depth_worker is not None:
@@ -472,6 +493,11 @@ def run_loop(
         fgr_t   = fgr[0].clamp(0, 1)             # [3,H,W] RGB
         base_bg = t_in[0].clamp(0, 1)            # [3,H,W] RGB
         alpha   = alpha.float(); alpha2d = alpha2d.float(); fgr_t = fgr_t.float(); base_bg = base_bg.float()
+
+        # 타겟 가중치 [1,H,W]: 타겟 사람(+grow 여유) 쪽 1, 다른 사람 쪽 0. 타겟이 없으면 None
+        target_w = None
+        if seg_worker is not None and target_selector is not None:
+            target_w = target_selector.update(seg_worker.state)
 
         # ===== 배경(보케 선택) =====
         bg_t = base_bg
@@ -879,6 +905,20 @@ def run_loop(
                 encode_logo(matte_np, logo_phase if logo_active else 0.0, logo_active, logo_anchor)
             matte_sender.submit(matte_np)
 
+        # 타겟 마스크 전송 (BGRA): R=타겟 알파(RVM 경계 × 타겟), G=다른 사람 알파, B=타겟 영역(grow 포함), A=255
+        # 타겟이 없으면 R=B=0(언리얼에서 효과 꺼짐), G=전체 알파.
+        if target_sender is not None:
+            if target_w is not None:
+                tw = target_w.to(alpha2d.dtype)
+                target_bgra = torch.cat(
+                    [tw, alpha2d * (1.0 - tw), alpha2d * tw, torch.ones_like(tw)], dim=0)
+            else:
+                target_bgra = torch.cat(
+                    [torch.zeros_like(alpha2d), alpha2d, torch.zeros_like(alpha2d), torch.ones_like(alpha2d)], dim=0)
+            target_u8 = target_bgra.permute(1,2,0).mul(255.0).clamp(0,255).to(torch.uint8).contiguous()
+            target_cpu_buf.copy_(target_u8, non_blocking=False)
+            target_sender.submit(target_cpu_buf.numpy().copy())
+
         # 배경 전송: clean 모드는 사람(+여유 영역)이 없는 픽셀만 천천히 갱신해 사람 없는 배경을 만든다.
         if bg_sender is not None:
             if str(bg_mode) == "clean":
@@ -924,6 +964,11 @@ def run_loop(
         # 프리뷰
         if not no_preview:
             disp = comp_t
+            if target_w is not None:
+                # 프리뷰에서만 타겟 사람을 붉게 표시
+                ta = (alpha2d * target_w.to(alpha2d.dtype)) * 0.45
+                red = torch.tensor([1.0, 0.1, 0.1], device=ta.device, dtype=ta.dtype).view(3, 1, 1)
+                disp = disp * (1.0 - ta) + red * ta
             if preview_scale < 1.0:
                 with torch.inference_mode():
                     disp = F.interpolate(
@@ -997,17 +1042,39 @@ def run_loop(
                 dvis = cv2.resize(dvis, (bgr.shape[1] // 5, bgr.shape[0] // 5))
                 bgr[10:10+dvis.shape[0], 10:10+dvis.shape[1]] = dvis
             cv2.imshow(preview_title, bgr)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            if key == ord('l') and distance_estimator is not None:
+            cmd = PREVIEW_KEY_CMDS.get(cv2.waitKey(1) & 0xFF)
+            if cmd:
+                pending_cmds.append(cmd)
+
+        # 런타임 명령: 프리뷰 창 키 + 콘솔(cmd 창) 키 → 같은 처리
+        if console_cmds is not None:
+            while True:
+                try:
+                    pending_cmds.append(console_cmds.get_nowait())
+                except queue.Empty:
+                    break
+        quit_requested = False
+        for cmd in pending_cmds:
+            if cmd == "quit":
+                quit_requested = True
+            elif cmd == "logo" and distance_estimator is not None:
                 logo_t0 = time.perf_counter()
                 print("[INFO] Logo: play")
-            if key == ord('b') and bg_sender is not None:
+            elif cmd == "bg_reset" and bg_sender is not None:
                 # 사람이 없을 때 누르면 현재 프레임 전체를 배경으로 다시 잡는다.
                 bg_plate = None
                 bg_reset_all = True
                 print("[INFO] Spout BG: background plate reset to current frame")
+            elif cmd == "target_next" and target_selector is not None:
+                target_selector.cycle()
+                print("[INFO] Target: next person")
+            elif cmd == "target_reset" and target_selector is not None:
+                target_selector.reset()
+                print(f"[INFO] Target: re-pick by mode '{target_selector.mode}'")
+        pending_cmds.clear()
+        if quit_requested:
+            print("[INFO] Quit requested")
+            break
 
         # ===== FPS 로그 =====
         frames += 1
@@ -1031,6 +1098,10 @@ def run_loop(
             if distance_estimator is not None:
                 capture_note += (f" | dist={person_z:.2f}m src={distance_estimator.source}"
                                  if person_z_valid else " | dist=-")
+            if seg_worker is not None:
+                seg_boxes = seg_worker.state.get("boxes")
+                capture_note += (f" | people={0 if seg_boxes is None else len(seg_boxes)}"
+                                 f" target={'on' if target_w is not None else '-'}")
             print(f"[INFO] {W}x{H} long={cur_long} ds={_compute_ds_ratio(H,W,cur_long):.3f} "
                   f"target={tgtfps:.2f} actual={fps:.1f} | prep={prep_ms:.1f}ms "
                   f"infer={infer_ms:.1f}ms post={post_ms:.1f}ms{capture_note}", flush=True)

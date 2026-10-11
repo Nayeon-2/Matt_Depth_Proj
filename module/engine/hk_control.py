@@ -226,13 +226,19 @@ class EnergyHotkey(threading.Thread):
         self._on_change = on_change
         self._on_cycle  = on_cycle
         self._on_sweep  = on_sweep 
-        self._on_toggle_pencil = on_toggle_pencil 
+        self._on_toggle_pencil = on_toggle_pencil
+        self._bindings: dict = {}   # 소문자 키 → (설명, 콜백). bind()로 등록
         try:
             import msvcrt
             self._msvcrt = msvcrt
         except Exception:
             self._msvcrt = None
         self.alive = True
+
+    def bind(self, key: str, callback: Callable[[], None], label: str = ""):
+        """콘솔 키 하나에 콜백을 등록한다. 기존 키(C, V, B, 숫자)보다 먼저 검사된다."""
+        self._bindings[key.lower()] = (label or key.upper(), callback)
+        print(f"[HK] console key '{key.upper()}' = {label}")
 
     def run(self):
         if self._msvcrt is None:
@@ -243,7 +249,13 @@ class EnergyHotkey(threading.Thread):
             try:
                 if self._msvcrt.kbhit():
                     ch = self._msvcrt.getwch()
-                    if ch in ('v','V'): 
+                    bound = self._bindings.get(ch.lower())
+                    if bound is not None:
+                        print(f"[HK] key='{ch.upper()}' → {bound[0]}")
+                        try: bound[1]()
+                        except Exception as e: print(f"[HK] '{ch.upper()}' 처리 실패: {e}")
+                        continue
+                    if ch in ('v','V'):
                         print("[HK] key='V' pressed")
                         if self._on_sweep:
                             try: self._on_sweep()

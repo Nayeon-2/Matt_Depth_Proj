@@ -339,6 +339,43 @@ def run_virtualcam(**kwargs):
                 print("[WARN] Spout BG 초기화 실패:", e)
                 bg_sender = None
 
+    # 타겟 한 사람 마스크: YOLO-seg로 사람을 나누고 한 명을 골라 RVM_TARGET으로 전송
+    target_sender = None
+    seg_worker = None
+    target_selector = None
+    if as_bool(kwargs.get("spout_target", False)):
+        if SpoutOutputSender is None:
+            print(f"[WARN] Spout 출력 모듈을 불러오지 못했습니다: {_spout_import_error}")
+        else:
+            try:
+                from module.models.yolo_seg_worker import YoloSegWorker, YoloSegConfig
+                from module.engine.target_person import TargetPersonSelector
+                seg_worker = YoloSegWorker(YoloSegConfig(
+                    model_name=str(kwargs.get("target_seg_model", "yolov8n-seg.pt")),
+                    imgsz=int(kwargs.get("target_seg_imgsz", 640)),
+                )).start()
+                target_selector = TargetPersonSelector(
+                    W, H,
+                    mode=str(kwargs.get("target_mode", "left")),
+                    lock_ttl_s=float(kwargs.get("target_lock_ttl", 1.0)),
+                    grow_px=int(kwargs.get("target_grow", 40)),
+                    feather_px=int(kwargs.get("target_feather", 6)),
+                    device=kwargs.get("device", "cuda"),
+                )
+                target_sender = SpoutOutputSender(
+                    name=str(kwargs.get("spout_target_name", "RVM_TARGET")),
+                    width=W,
+                    height=H,
+                    invert=as_bool(kwargs.get("spout_invert", False)),
+                ).start()
+                print(f"[INFO] Spout TARGET ready: name='{target_sender.name}', "
+                      f"mode={target_selector.mode} (T=다음 사람, Y=기준으로 다시 고르기)")
+            except Exception as e:
+                print("[WARN] 타겟 마스크 초기화 실패:", e)
+                if seg_worker is not None:
+                    seg_worker.stop()
+                target_sender = seg_worker = target_selector = None
+
     pose_worker = None
     distance_estimator = None
     if as_bool(kwargs.get("person_distance", False)):
@@ -369,6 +406,18 @@ def run_virtualcam(**kwargs):
                 if pose_worker is not None:
                     pose_worker.stop()
                 pose_worker = distance_estimator = None
+
+    # 콘솔(cmd 창) 핫키 → 루프 명령 큐. 프리뷰 창 키(T/Y/L/B/Q)와 같은 동작을 프리뷰 없이도 쓸 수 있다.
+    # 콘솔의 B는 기존 연필 토글이라 배경 리셋은 R로 둔다.
+    console_cmds = queue.Queue()
+    hk.bind("q", lambda: console_cmds.put("quit"), "종료")
+    if target_selector is not None:
+        hk.bind("t", lambda: console_cmds.put("target_next"), "타겟: 다음 사람")
+        hk.bind("y", lambda: console_cmds.put("target_reset"), "타겟: 기준으로 다시 고르기")
+    if distance_estimator is not None:
+        hk.bind("l", lambda: console_cmds.put("logo"), "로고 연출")
+    if bg_sender is not None:
+        hk.bind("r", lambda: console_cmds.put("bg_reset"), "배경 다시 잡기")
 
     active_senders = [s for s in (obs_sender, decklink_sender, spout_sender) if s is not None]
     combined_sender = (MultiSender(active_senders) if len(active_senders) > 1
@@ -451,7 +500,7 @@ def run_virtualcam(**kwargs):
     preview_scale = float(kwargs.get("preview_scale", 0.5))
     show_depth    = as_bool(kwargs.get("show_depth", False))
 
-    if (combined_sender is None) and (matte_sender is None) and (bg_sender is None) and no_preview:
+    if (combined_sender is None) and (matte_sender is None) and (bg_sender is None) and (target_sender is None) and no_preview:
         print("[INFO] No sender & no_preview=True → forcing preview ON for visibility")
         no_preview = False
 
@@ -596,6 +645,10 @@ def run_virtualcam(**kwargs):
             bg_margin=int(kwargs.get("spout_bg_margin", 15)),
             pose_worker=pose_worker,
             distance_estimator=distance_estimator,
+            seg_worker=seg_worker,
+            target_selector=target_selector,
+            target_sender=target_sender,
+            console_cmds=console_cmds,
             logo_duration=float(kwargs.get("logo_duration", 4.0)),
             logo_every=float(kwargs.get("logo_every", 0.0)),
             no_preview=no_preview,
@@ -627,6 +680,10 @@ def run_virtualcam(**kwargs):
                 matte_sender.stop()
             if bg_sender is not None:
                 bg_sender.stop()
+            if target_sender is not None:
+                target_sender.stop()
+            if seg_worker is not None:
+                seg_worker.stop()
             if pose_worker is not None:
                 pose_worker.stop()
             if hk: hk.stop()

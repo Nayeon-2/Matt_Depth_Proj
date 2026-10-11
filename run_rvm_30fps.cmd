@@ -16,10 +16,26 @@ exit /b 1
 
 :launch
 echo [INFO] Python: %PYTHON_EXE%
+
+rem Input FPS: RVM_FPS env var if set, otherwise ask (Enter = 30).
+rem Must match the OBS Video FPS setting (OBS Virtual Camera only offers that rate).
+if defined RVM_FPS goto :check_fps
+:ask_fps
+set "RVM_FPS=30"
+set /p "RVM_FPS=Input FPS number (must match OBS: 25 / 30 / 30000/1001 / 60), Enter = 30: "
+:check_fps
+rem Accept only a number (25, 29.97) or a ratio (30000/1001).
+echo(%RVM_FPS%| findstr /r /x "[0-9][0-9]*[.]*[0-9]* [0-9][0-9]*/[0-9][0-9]*" >nul
+if errorlevel 1 (
+  echo [WARN] "%RVM_FPS%" is not a frame rate. Enter a number such as 30.
+  goto :ask_fps
+)
+echo [INFO] Input FPS: %RVM_FPS%
+
 "%PYTHON_EXE%" "rvm_main.py" ^
   --ffmpeg-in dshow ^
   --dshow-name "OBS Virtual Camera" ^
-  --force-fps 30 ^
+  --force-fps %RVM_FPS% ^
   --force-size 1920x1080 ^
   --raw-format bgr24 ^
   --preview ^

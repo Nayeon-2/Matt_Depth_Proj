@@ -81,6 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--spout-bg-rate", type=float, default=0.15, help="clean 배경 갱신 속도(0~1)")
     g.add_argument("--spout-bg-margin", type=int, default=15, help="clean 배경에서 사람 주변 제외 여유(px)")
 
+    # Target person mask (YOLO-seg) → 한 사람에게만 효과를 줄 수 있도록 별도 Spout로 전송
+    g = p.add_argument_group("Target Person")
+    g.add_argument("--spout-target", type=int, default=0,
+                   help="타겟 마스크를 별도 Spout sender로 전송(1/0). R=타겟 알파, G=다른 사람 알파, B=타겟 영역")
+    g.add_argument("--spout-target-name", type=str, default="RVM_TARGET", help="타겟 마스크 Spout sender 이름")
+    g.add_argument("--target-mode", type=str, default="left",
+                   choices=["left", "right", "center", "largest", "nearest"], help="타겟을 고르는 기준")
+    g.add_argument("--target-seg-model", type=str, default="yolov8n-seg.pt", help="YOLO-seg 가중치")
+    g.add_argument("--target-seg-imgsz", type=int, default=640, help="YOLO-seg 추론 해상도")
+    g.add_argument("--target-grow", type=int, default=40, help="타겟 영역을 사람 바깥으로 넓히는 폭(px)")
+    g.add_argument("--target-feather", type=int, default=6, help="타겟 영역 경계 부드럽게(px)")
+    g.add_argument("--target-lock-ttl", type=float, default=1.0, help="타겟을 놓쳐도 유지하는 시간(초)")
+
     # Person distance (pose body size + foot contact) → matte 좌상단 픽셀로 언리얼에 전달
     g = p.add_argument_group("Person Distance")
     g.add_argument("--person-distance", type=int, default=0, help="사람 거리 추정 사용(1/0), matte 모드 필요")
@@ -332,6 +345,14 @@ def args_to_run_kwargs(args) -> dict:
         spout_bg_mode=args.spout_bg_mode,
         spout_bg_rate=args.spout_bg_rate,
         spout_bg_margin=args.spout_bg_margin,
+        spout_target=bool(args.spout_target),
+        spout_target_name=args.spout_target_name,
+        target_mode=args.target_mode,
+        target_seg_model=args.target_seg_model,
+        target_seg_imgsz=args.target_seg_imgsz,
+        target_grow=args.target_grow,
+        target_feather=args.target_feather,
+        target_lock_ttl=args.target_lock_ttl,
         person_distance=bool(args.person_distance),
         dist_hfov=args.dist_hfov,
         dist_cam_height=args.dist_cam_height,
