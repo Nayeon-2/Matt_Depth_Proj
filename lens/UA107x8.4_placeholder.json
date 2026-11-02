@@ -1,0 +1,7 @@
+{
+  "name": "Fujinon UA107x8.4 (placeholder)",
+  "note": "Not calibrated. Assumes the converter sends zoom 0..65535 from full wide to full tele, linear in log(focal). Replace points with a real calibration (docs/zoom_tracking_design.md) before the show.",
+  "sensor_width_mm": 9.59,
+  "calibrated": false,
+  "points": [[0, 8.4], [65535, 900.0]]
+}

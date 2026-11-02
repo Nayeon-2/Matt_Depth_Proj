@@ -237,6 +237,10 @@ def run_virtualcam(**kwargs):
         ffmpeg_bin=ffmpeg_bin,
         decklink_device=decklink_device,
         decklink_format=decklink_format,
+        input_file=kwargs.get("input_file"),
+        input_loop=bool(kwargs.get("input_loop", True)),
+        target_fps=kwargs.get("target_fps"),
+        sdi_deinterlace=kwargs.get("sdi_deinterlace", "adaptive"),
     )
     print(f"[INFO] Input ready: ffmpeg_in='{ffmpeg_in}' decklink_device='{decklink_device}' decklink_format='{decklink_format}' size={W}x{H}")
 
@@ -255,7 +259,7 @@ def run_virtualcam(**kwargs):
                     a, b = s.split("/")
                     return float(a) / float(b)
                 return float(s)
-            obs_fps = obs_fps_from_input if ffmpeg_in == "decklink" else _parse_fps(target_fps)
+            obs_fps = obs_fps_from_input if ffmpeg_in in ("decklink", "sdk") else _parse_fps(target_fps)
             virtualcam = open_virtualcam(W, H, obs_fps)
             if virtualcam is None:
                 print("[WARN] OBS VirtualCam 사용 불가. 계속 진행.")
@@ -396,28 +400,63 @@ def run_virtualcam(**kwargs):
                 distance_estimator = PersonDistanceEstimator(
                     W, H,
                     hfov_deg=float(kwargs.get("dist_hfov", 60.0)),
+                    body_method=str(kwargs.get("dist_body", "full")),
                     cam_height_m=kwargs.get("dist_cam_height"),
                     cam_pitch_deg=kwargs.get("dist_cam_pitch"),
                     calib_path=str(calib),
                 )
-                print(f"[INFO] Person distance ON (hfov={kwargs.get('dist_hfov', 60.0)}, calib='{calib.name}')")
+                print(f"[INFO] Person distance ON (hfov={kwargs.get('dist_hfov', 60.0)}, "
+                      f"body={kwargs.get('dist_body', 'full')}, calib='{calib.name}')")
             except Exception as e:
                 print("[WARN] Person distance 초기화 실패:", e)
                 if pose_worker is not None:
                     pose_worker.stop()
                 pose_worker = distance_estimator = None
 
-    # 콘솔(cmd 창) 핫키 → 루프 명령 큐. 프리뷰 창 키(T/Y/L/B/Q)와 같은 동작을 프리뷰 없이도 쓸 수 있다.
+    # 렌즈 줌: 소스(FreeD/키보드 ...)는 바꿔 끼우고, 결과는 matte 블록 5 + 거리 추정 초점거리로 간다.
+    zoom_source = None
+    zoom_kind = str(kwargs.get("zoom_source", "off")).lower()
+    if zoom_kind != "off":
+        if matte_sender is None:
+            print("[WARN] --zoom-source 는 --spout-out 1 --spout-mode matte 에서만 Unreal로 전달됩니다.")
+        try:
+            from module.engine.zoom import make_zoom_source
+            opts = {}
+            if zoom_kind == "freed":
+                opts = dict(port=int(kwargs.get("freed_port", 40000)),
+                            camera_id=int(kwargs.get("freed_camera_id", -1)),
+                            delay_ms=float(kwargs.get("zoom_delay_ms", 0.0)),
+                            extender=float(kwargs.get("zoom_extender", 1.0)))
+            elif zoom_kind == "replay":
+                csv = kwargs.get("zoom_replay") or str(Path(kwargs.get("input_file") or "clip").with_suffix(".zoom.csv"))
+                opts = dict(path=csv)
+            elif zoom_kind == "sdi":
+                if getattr(grab, "reader", None) is None:
+                    print("[WARN] --zoom-source sdi 는 --ffmpeg-in sdk 입력에서만 값을 받습니다.")
+                opts = dict(reader=getattr(grab, "reader", None),
+                            extender=float(kwargs.get("zoom_extender", 1.0)))
+            zoom_source = make_zoom_source(zoom_kind, lens=kwargs.get("zoom_lens"), **opts)
+            print(f"[INFO] Zoom tracking ON: {zoom_source.status()}")
+        except Exception as e:
+            print("[WARN] Zoom 소스 초기화 실패:", e)
+            zoom_source = None
+
+    # 콘솔(cmd 창) 핫키 → 루프 명령 큐. 프리뷰 창 키(T/Y/I/B/Q)와 같은 동작을 프리뷰 없이도 쓸 수 있다.
     # 콘솔의 B는 기존 연필 토글이라 배경 리셋은 R로 둔다.
     console_cmds = queue.Queue()
     hk.bind("q", lambda: console_cmds.put("quit"), "종료")
     if target_selector is not None:
         hk.bind("t", lambda: console_cmds.put("target_next"), "타겟: 다음 사람")
         hk.bind("y", lambda: console_cmds.put("target_reset"), "타겟: 기준으로 다시 고르기")
-    if distance_estimator is not None:
-        hk.bind("l", lambda: console_cmds.put("logo"), "로고 연출")
+    if spout_mode == "matte":
+        hk.bind("i", lambda: console_cmds.put("glitch"), "글리치 켜기/끄기 (부드럽게)")
     if bg_sender is not None:
         hk.bind("r", lambda: console_cmds.put("bg_reset"), "배경 다시 잡기")
+    if zoom_source is not None:
+        for key, cmd, label in (("[", "zoom_delay_dec", "줌 지연 -"), ("]", "zoom_delay_inc", "줌 지연 +"),
+                                ("x", "zoom_extender", "줌 익스텐더 전환"), ("=", "zoom_in", "줌 인(manual)"),
+                                ("-", "zoom_out", "줌 아웃(manual)"), ("z", "zoom_reset", "줌 와이드(manual)")):
+            hk.bind(key, (lambda c=cmd: console_cmds.put(c)), label)
 
     active_senders = [s for s in (obs_sender, decklink_sender, spout_sender) if s is not None]
     combined_sender = (MultiSender(active_senders) if len(active_senders) > 1
@@ -639,24 +678,29 @@ def run_virtualcam(**kwargs):
             # 프리뷰/출력
             sender=combined_sender,
             matte_sender=matte_sender,
+            matte_color=str(kwargs.get("matte_color", "source")),
             bg_sender=bg_sender,
             bg_mode=str(kwargs.get("spout_bg_mode", "clean")),
             bg_rate=float(kwargs.get("spout_bg_rate", 0.15)),
             bg_margin=int(kwargs.get("spout_bg_margin", 15)),
             pose_worker=pose_worker,
             distance_estimator=distance_estimator,
+            zoom_source=zoom_source,
             seg_worker=seg_worker,
             target_selector=target_selector,
             target_sender=target_sender,
             console_cmds=console_cmds,
             logo_duration=float(kwargs.get("logo_duration", 4.0)),
             logo_every=float(kwargs.get("logo_every", 0.0)),
+            glitch_fade=float(kwargs.get("glitch_fade", 0.8)),
+            glitch_start=as_bool(kwargs.get("glitch_start", False)),
             no_preview=no_preview,
             preview_scale=preview_scale,
             show_depth=show_depth,
 
             # 로그
             show_fps=as_bool(kwargs.get("show_fps", True)),
+            profile=as_bool(kwargs.get("profile", False)),
             log_detail=int(kwargs.get("log_detail", 1)),
 
             # ★ 런타임 에너지 색 공급자(핵심 추가)
@@ -686,6 +730,8 @@ def run_virtualcam(**kwargs):
                 seg_worker.stop()
             if pose_worker is not None:
                 pose_worker.stop()
+            if zoom_source is not None:
+                zoom_source.stop()
             if hk: hk.stop()
             if depth_worker: depth_worker.stop()
             grab.release()

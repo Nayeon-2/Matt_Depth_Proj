@@ -1,0 +1,79 @@
+{
+ "name": "UA24x7.8B_v2",
+ "note": "Measured from anc_20261027_142123.jsonl (sweeps 4): picture scale vs SDI zoom value. Picture gave x9.22 at full tele, curve log-scaled by 1.4301 to the spec 7.8-187 mm. Extender not included (X key / --zoom-extender).",
+ "sensor_width_mm": 9.59,
+ "calibrated": true,
+ "sdi": {
+  "did": "0x51",
+  "sdid": "0x01",
+  "byte": 65,
+  "bytes": 2,
+  "endian": "big"
+ },
+ "points": [
+  [
+   0,
+   7.8
+  ],
+  [
+   17415,
+   8.761
+  ],
+  [
+   19468,
+   10.001
+  ],
+  [
+   21512,
+   11.421
+  ],
+  [
+   23550,
+   12.926
+  ],
+  [
+   25632,
+   14.638
+  ],
+  [
+   26964,
+   15.809
+  ],
+  [
+   46490,
+   68.173
+  ],
+  [
+   48005,
+   75.901
+  ],
+  [
+   50189,
+   89.272
+  ],
+  [
+   52187,
+   103.812
+  ],
+  [
+   54250,
+   118.314
+  ],
+  [
+   56373,
+   136.659
+  ],
+  [
+   58364,
+   159.024
+  ],
+  [
+   59825,
+   187.0
+  ],
+  [
+   65535,
+   187.0
+  ]
+ ]
+}

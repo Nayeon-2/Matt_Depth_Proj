@@ -22,6 +22,7 @@ test_videos/
 
 # Local state / logs
 logs/
+anc_logs/
 cache/
 *.log
 ground_calib.json

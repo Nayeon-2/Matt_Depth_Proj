@@ -1,6 +1,10 @@
 """Person distance estimation from pose keypoints (method D).
 
-- Body size: shoulder width / torso length in pixels -> distance (pinhole model).
+- Body size -> distance (pinhole model). Default "full": the vertical chain
+  shoulders -> hips -> knee -> ankle. It barely changes when the person turns or
+  moves the arms, and uses many more pixels than the shoulder width, so small
+  walk-in distances stay visible. "upper": shoulder width / torso length (used
+  automatically when the legs are not visible).
 - Foot contact: when the feet are visible, the ankle row on a flat floor gives a
   body-size independent distance. The floor geometry (camera height, pitch) is
   self-calibrated from body-size samples and saved to a JSON file.
@@ -19,7 +23,7 @@ from typing import Optional
 import numpy as np
 
 # COCO keypoint indices
-L_SH, R_SH, L_HIP, R_HIP, L_ANK, R_ANK = 5, 6, 11, 12, 15, 16
+L_SH, R_SH, L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANK, R_ANK = 5, 6, 11, 12, 13, 14, 15, 16
 
 # Encoding of the distance inside the matte frame (top-left block, alpha = 0)
 CODE_BLOCK = 4
@@ -60,6 +64,8 @@ class PersonDistanceEstimator:
         hfov_deg: float = 60.0,
         shoulder_m: float = 0.39,
         torso_m: float = 0.52,
+        leg_m: float = 0.80,
+        body_method: str = "full",
         kp_conf: float = 0.5,
         cam_height_m: Optional[float] = None,
         cam_pitch_deg: Optional[float] = None,
@@ -67,9 +73,13 @@ class PersonDistanceEstimator:
         lost_reset_s: float = 1.0,
     ):
         self.W, self.H = int(width), int(height)
-        self.f = (self.W / 2) / math.tan(math.radians(hfov_deg / 2))
+        self.f0 = (self.W / 2) / math.tan(math.radians(hfov_deg / 2))   # focal (px) at full wide
+        self.f = self.f0
         self.cy = self.H / 2
-        self.shoulder_m, self.torso_m, self.kp_conf = shoulder_m, torso_m, kp_conf
+        self.shoulder_m, self.torso_m, self.leg_m, self.kp_conf = shoulder_m, torso_m, leg_m, kp_conf
+        self.body_method = body_method if body_method in ("full", "upper") else "full"
+        self._full_per_upper = 1.0      # learned full/upper ratio: smooth hand-over when legs leave the frame
+        self.body_kind = "-"            # which body measure gave the last value ("full" / "upper")
         self.lost_reset_s = lost_reset_s
 
         self.calib_path = Path(calib_path) if calib_path else None
@@ -96,8 +106,44 @@ class PersonDistanceEstimator:
         self._last_t: Optional[float] = None
         self._spike_count = 0
 
+    def set_zoom(self, scale: float):
+        """Lens zoom relative to full wide (1.0 = the --dist-hfov view). Call every frame."""
+        self.f = self.f0 * max(float(scale), 1e-3)
+
     # ---------- geometry ----------
+    def _seg(self, k: np.ndarray, c: np.ndarray, a: int, b: int) -> float:
+        return float(np.linalg.norm(k[a] - k[b])) if c[a] > self.kp_conf and c[b] > self.kp_conf else math.nan
+
+    def _full_distance(self, k: np.ndarray, c: np.ndarray) -> float:
+        """Shoulder-mid -> hip-mid -> knee -> ankle chain (longer leg: the less foreshortened one)."""
+        if min(c[L_SH], c[R_SH], c[L_HIP], c[R_HIP]) <= self.kp_conf:
+            return math.nan
+        torso = float(np.linalg.norm((k[L_SH] + k[R_SH]) / 2 - (k[L_HIP] + k[R_HIP]) / 2))
+        legs = [self._seg(k, c, hip, knee) + self._seg(k, c, knee, ank)
+                for hip, knee, ank in ((L_HIP, L_KNEE, L_ANK), (R_HIP, R_KNEE, R_ANK))]
+        legs = [x for x in legs if not math.isnan(x)]
+        if not legs or torso <= 2:
+            return math.nan
+        chain = torso + max(legs)
+        return self.f * (self.torso_m + self.leg_m) / chain if chain > 10 else math.nan
+
     def _body_distance(self, k: np.ndarray, c: np.ndarray) -> float:
+        z_up = self._upper_distance(k, c)
+        if self.body_method == "upper":
+            self.body_kind = "upper"
+            return z_up
+        z_full = self._full_distance(k, c)
+        if not math.isnan(z_full):
+            if not math.isnan(z_up):
+                r = z_full / z_up
+                if 0.5 < r < 2.0:
+                    self._full_per_upper += 0.05 * (r - self._full_per_upper)
+            self.body_kind = "full"
+            return z_full
+        self.body_kind = "upper"
+        return z_up * self._full_per_upper
+
+    def _upper_distance(self, k: np.ndarray, c: np.ndarray) -> float:
         vals = []
         if c[L_SH] > self.kp_conf and c[R_SH] > self.kp_conf:
             sh = float(np.linalg.norm(k[L_SH] - k[R_SH]))
@@ -176,6 +222,7 @@ class PersonDistanceEstimator:
                 self.valid = False
                 self.source = "none"
                 self.person_scale = 1.0
+                self._full_per_upper = 1.0
                 self.filter.reset()
                 self._spike_count = 0
             return (self.z if self.z is not None else 0.0), self.valid
@@ -204,11 +251,11 @@ class PersonDistanceEstimator:
         if not math.isnan(z_foot) and not math.isnan(z_body):
             # geometric mean of both cues: smooth hand-over when the feet appear / disappear
             meas = math.sqrt(z_foot * z_body * self.person_scale)
-            self.source = "foot+body"
+            self.source = f"foot+{self.body_kind}"
         elif not math.isnan(z_foot):
             meas, self.source = z_foot, "foot"
         elif not math.isnan(z_body):
-            meas, self.source = z_body * self.person_scale, "body"
+            meas, self.source = z_body * self.person_scale, self.body_kind
         else:
             return (self.z if self.z is not None else 0.0), self.valid
 
@@ -236,6 +283,11 @@ def encode_distance(frame_bgra: np.ndarray, z_m: float, valid: bool):
     blk[..., 1] = mm & 0xFF             # G: low byte
     blk[..., 2] = (mm >> 8) & 0xFF      # R: high byte
     blk[..., 3] = 0                     # A: keep invisible
+    put_signature(frame_bgra)
+
+
+def put_signature(frame_bgra: np.ndarray):
+    """Block 1: the code signature (pure green, alpha 0). Any encoder may write it."""
     sig = frame_bgra[:CODE_BLOCK, CODE_BLOCK:2 * CODE_BLOCK]
     sig[..., 0] = 0
     sig[..., 1] = 255
@@ -262,6 +314,12 @@ def encode_logo(frame_bgra: np.ndarray, phase: float, active: bool, anchor_xy: t
     _put16(frame_bgra, 2, phase, active)
     _put16(frame_bgra, 3, anchor_xy[0], True)
     _put16(frame_bgra, 4, anchor_xy[1], True)
+
+
+def encode_glitch(frame_bgra: np.ndarray, level: float, on: bool):
+    """Block 6 (x 24..27): R,G = glitch level 0..1 (16 bit, already eased), B = 255 while switched on (I key)."""
+    _put16(frame_bgra, 6, level, on)
+    put_signature(frame_bgra)
 
 
 def chest_anchor(kps: Optional[np.ndarray], conf: Optional[np.ndarray], width: int, height: int,

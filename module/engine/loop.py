@@ -16,17 +16,26 @@ from ..effects.ripple_lines_1 import draw_moving_outlines
 from ..effects.edge_pencil import draw_pencil_outline
 from ..effects.energy import apply_energy
 from ..effects.per_person_core import parse_palette, connected_instances_from_alpha
-from .person_distance import encode_distance, encode_logo, chest_anchor
+from .person_distance import CODE_BLOCK, encode_distance, encode_logo, encode_glitch, chest_anchor
+from .zoom import encode_zoom
+
+CODE_ROW_PX = 8 * CODE_BLOCK   # matte code blocks 0..7 (distance, signature, logo, zoom, glitch, reserved)
 
 from ..models.deepsort.deepsort_tracker import DeepSortTracker
 
 # 프리뷰 창 키 → 런타임 명령 (콘솔 핫키도 같은 명령을 console_cmds 큐로 보낸다)
 PREVIEW_KEY_CMDS = {
     ord('q'): "quit",
-    ord('l'): "logo",
+    ord('i'): "glitch",
     ord('b'): "bg_reset",
     ord('t'): "target_next",
     ord('y'): "target_reset",
+    ord('['): "zoom_delay_dec",
+    ord(']'): "zoom_delay_inc",
+    ord('x'): "zoom_extender",
+    ord('='): "zoom_in",
+    ord('-'): "zoom_out",
+    ord('z'): "zoom_reset",
 }
 
 # --- add: small helpers for energy ---
@@ -287,25 +296,30 @@ def run_loop(
 
     # 프리뷰/출력
     sender=None,                # Obs/DeckLink Sender 또는 None
-    matte_sender=None,          # 사람 누끼(BGRA: RVM fgr + alpha)를 받는 Sender 또는 None
+    matte_sender=None,          # 사람 누끼(BGRA: 색 + RVM alpha)를 받는 Sender 또는 None
+    matte_color: str = "source",  # 누끼 색: "source"=원본 프레임 픽셀(화질 그대로) / "fgr"=RVM이 예측한 전경색
     bg_sender=None,             # 배경(BGR)을 받는 Sender 또는 None
     bg_mode: str = "clean",     # "clean": 사람 없는 영역만 누적한 배경 / "raw": 입력 프레임 그대로
     bg_rate: float = 0.15,      # clean 모드에서 보이는 배경 픽셀의 갱신 속도(0~1)
     bg_margin: int = 15,        # clean 모드에서 사람 주변을 추가로 제외할 여유(px)
     pose_worker=None,           # PoseWorker (사람 거리 추정용) 또는 None
     distance_estimator=None,    # PersonDistanceEstimator 또는 None → 거리값을 matte 좌상단 픽셀에 인코딩
+    zoom_source=None,           # module.engine.zoom 소스 또는 None → 줌 배율을 matte 블록 5에 인코딩, 거리 추정 초점거리 갱신
     seg_worker=None,            # YoloSegWorker (사람별 인스턴스 마스크) 또는 None
     target_selector=None,       # TargetPersonSelector (효과를 줄 한 사람 선택) 또는 None
     target_sender=None,         # 타겟 마스크(BGRA: B=타겟 영역, G=다른 사람 알파, R=타겟 알파)를 받는 Sender 또는 None
-    console_cmds=None,          # queue.Queue: 콘솔 핫키가 넣는 명령("quit", "logo", "bg_reset", "target_next", "target_reset")
-    logo_duration: float = 4.0, # L 키 로고 연출 길이(초): 뚫고 나옴 → 머묾 → 사라짐
+    console_cmds=None,          # queue.Queue: 콘솔 핫키가 넣는 명령("quit", "glitch", "bg_reset", "target_next", "target_reset", ...)
+    logo_duration: float = 4.0, # 로고 연출 길이(초): 뚫고 나옴 → 머묾 → 사라짐
     logo_every: float = 0.0,    # >0 이면 이 간격(초)마다 로고 연출을 자동 실행 (테스트/자동 반복용)
+    glitch_fade: float = 0.8,   # I 키 글리치 켜짐/꺼짐에 걸리는 시간(초). matte 블록 6으로 Unreal에 전달
+    glitch_start: bool = False, # True 면 글리치가 켜진 상태로 시작 (I 키로 끔)
     no_preview: bool = False,
     preview_scale: float = 0.5,
     show_depth: bool = False,
 
     # 로그
     show_fps: bool = True,
+    profile: bool = False,
     log_detail: int = 1,
 ):
     """메인 루프 (beam 제거 버전, Y-band 제한 적용)"""
@@ -346,10 +360,14 @@ def run_loop(
     bg_frames = 0
     bg_reset_all = False
     person_z, person_z_valid, last_pose_ts = 0.0, False, 0.0
-    logo_t0 = None                 # L 키를 누른 시각 (로고 연출 시작)
+    zoom = None                    # 이번 프레임의 ZoomSample
+    logo_t0 = None                 # 로고 연출 시작 시각 (--logo-every)
     logo_anchor = (0.5, 0.55)      # 사람 가슴의 화면 위치 (0..1)
     logo_last_auto = time.perf_counter()
     pending_cmds: list[str] = []   # 이번 프레임에 처리할 런타임 명령
+    glitch_on = bool(glitch_start) # I 키로 켜고 끔
+    glitch_x = 0.0                 # 0..1 선형 진행값 (보낼 때 smoothstep)
+    glitch_ts = time.perf_counter()
 
     # Tracker
     tracker = DeepSortTracker(
@@ -371,6 +389,21 @@ def run_loop(
     except Exception:
         palette_len = 4
 
+    # 구간별 시간 측정(--profile 1): 구간 끝마다 GPU 동기화 후 누적(ms)
+    prof_sum: dict = {}
+    prof_last = 0.0
+    prof_cuda = bool(profile) and torch.cuda.is_available()
+
+    def _prof(name):
+        nonlocal prof_last
+        if not profile:
+            return
+        if prof_cuda:
+            torch.cuda.synchronize()
+        now = time.perf_counter()
+        prof_sum[name] = prof_sum.get(name, 0.0) + (now - prof_last) * 1000.0
+        prof_last = now
+
     # 루프
     t0 = time.perf_counter(); frames = 0
     consecutive_timeouts = 0
@@ -387,6 +420,12 @@ def run_loop(
                 break
             continue
         consecutive_timeouts = 0
+
+        # 렌즈 줌: 프레임이 들어온 시각 기준으로 샘플 (소스가 영상 지연을 보정)
+        if zoom_source is not None:
+            zoom = zoom_source.sample(time.perf_counter(), frame, getattr(grab, "last_index", None))
+            if distance_estimator is not None:
+                distance_estimator.set_zoom(zoom.scale)
 
         # 사람 거리: 포즈 워커에 최신 프레임 공급, 새 결과가 나오면 추정기 갱신
         if pose_worker is not None and distance_estimator is not None:
@@ -414,6 +453,7 @@ def run_loop(
 
         # 입력 변환(BGR->RGB)
         prep_t0 = time.perf_counter()
+        prof_last = prep_t0
         frame_c = np.ascontiguousarray(frame)
         if input_cpu is not None:
             np.copyto(input_cpu_np, frame_c, casting="no")
@@ -426,6 +466,7 @@ def run_loop(
         try: t_in = t_in.contiguous(memory_format=torch.channels_last)
         except: pass
         prep_t1 = time.perf_counter()
+        _prof("prep")
 
         # depth 단일 추론(선택)
         if use_depth and depth_worker is not None and depth_worker.latest is not None:
@@ -450,6 +491,7 @@ def run_loop(
             else:
                 fgr, pha, *rec = rvm(t_in, *rec, downsample_ratio=ds)
         infer_t1 = time.perf_counter()
+        _prof("infer")
 
         # ===== 알파 후처리 =====
         alpha = pha[0:1].clamp(0,1)
@@ -498,6 +540,7 @@ def run_loop(
         target_w = None
         if seg_worker is not None and target_selector is not None:
             target_w = target_selector.update(seg_worker.state)
+        _prof("alpha")
 
         # ===== 배경(보케 선택) =====
         bg_t = base_bg
@@ -816,6 +859,8 @@ def run_loop(
         if comp_t.dim() == 4 and comp_t.size(0) == 1:
             comp_t = comp_t.squeeze(0)   # [1,3,H,W] -> [3,H,W]
 
+        _prof("comp")
+
         # ===== 출력 준비(torch -> numpy BGR u8) =====
         # Preview-only mode performs its own scaled transfer below. Avoid a
         # second full-resolution GPU->CPU copy when no external sender exists.
@@ -885,15 +930,27 @@ def run_loop(
         if sender is not None and bgr_out is not None:
             sender.submit(bgr_out.copy())
 
+        _prof("out")
+
         # 누끼 전송: 이펙트 없이 RVM 전경색 + 알파 (straight alpha, BGRA)
         if matte_sender is not None:
             matte_u8_bgra = (
-                torch.cat([fgr_t[[2,1,0], ...], alpha2d], dim=0)
+                # source: 사람 색은 원본 픽셀 그대로, 모양(알파)만 RVM. RVM 전경색은 줄인 해상도에서
+                # 예측돼 디테일이 무르고, 넓힌 알파 가장자리에는 지어낸 색이 비친다.
+                torch.cat([(base_bg if matte_color == "source" else fgr_t)[[2,1,0], ...], alpha2d], dim=0)
                 .permute(1,2,0)
-                .mul(255.0).clamp(0,255).to(torch.uint8).contiguous()
+                .mul(255.0).add(0.5).clamp(0,255).to(torch.uint8).contiguous()
             )
             matte_cpu_buf.copy_(matte_u8_bgra, non_blocking=False)
             matte_np = matte_cpu_buf.numpy().copy()
+            # Clear the whole code row first: blocks nobody writes must read as "invalid",
+            # not as whatever RVM foreground colour sits in the corner (Unreal decodes it).
+            matte_np[:CODE_BLOCK, :CODE_ROW_PX] = 0
+            now = time.perf_counter()
+            step = (now - glitch_ts) / max(float(glitch_fade), 1e-3)
+            glitch_ts = now
+            glitch_x = min(1.0, glitch_x + step) if glitch_on else max(0.0, glitch_x - step)
+            encode_glitch(matte_np, glitch_x * glitch_x * (3.0 - 2.0 * glitch_x), glitch_on)
             if distance_estimator is not None:
                 encode_distance(matte_np, person_z, person_z_valid)
                 if logo_every > 0 and (time.perf_counter() - logo_last_auto) >= float(logo_every):
@@ -903,7 +960,11 @@ def run_loop(
                 if not logo_active:
                     logo_t0 = None
                 encode_logo(matte_np, logo_phase if logo_active else 0.0, logo_active, logo_anchor)
+            if zoom is not None:
+                encode_zoom(matte_np, zoom)
             matte_sender.submit(matte_np)
+
+        _prof("matte")
 
         # 타겟 마스크 전송 (BGRA): R=타겟 알파(RVM 경계 × 타겟), G=다른 사람 알파, B=타겟 영역(grow 포함), A=255
         # 타겟이 없으면 R=B=0(언리얼에서 효과 꺼짐), G=전체 알파.
@@ -918,6 +979,8 @@ def run_loop(
             target_u8 = target_bgra.permute(1,2,0).mul(255.0).clamp(0,255).to(torch.uint8).contiguous()
             target_cpu_buf.copy_(target_u8, non_blocking=False)
             target_sender.submit(target_cpu_buf.numpy().copy())
+
+        _prof("target")
 
         # 배경 전송: clean 모드는 사람(+여유 영역)이 없는 픽셀만 천천히 갱신해 사람 없는 배경을 만든다.
         if bg_sender is not None:
@@ -960,6 +1023,8 @@ def run_loop(
             )
             bg_cpu_buf.copy_(bg_u8_bgr, non_blocking=False)
             bg_sender.submit(bg_cpu_buf.numpy().copy())
+
+        _prof("bg")
 
         # 프리뷰
         if not no_preview:
@@ -1035,6 +1100,11 @@ def run_loop(
                 txt = (f"dist {person_z:.2f} m ({distance_estimator.source})" if person_z_valid else "dist -")
                 cv2.putText(bgr, txt, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
                 cv2.putText(bgr, txt, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+            if zoom is not None:
+                txt = (f"zoom x{zoom.scale:.2f} {zoom.focal_mm:.1f}mm ({zoom.source})" if zoom.valid
+                       else f"zoom - (hold x{zoom.scale:.2f})")
+                cv2.putText(bgr, txt, (12, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(bgr, txt, (12, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 0), 2, cv2.LINE_AA)
 
             if show_depth and (last_depth is not None):
                 dvis = (np.clip(last_depth, 0, 1) * 255).astype(np.uint8)
@@ -1057,9 +1127,9 @@ def run_loop(
         for cmd in pending_cmds:
             if cmd == "quit":
                 quit_requested = True
-            elif cmd == "logo" and distance_estimator is not None:
-                logo_t0 = time.perf_counter()
-                print("[INFO] Logo: play")
+            elif cmd == "glitch":
+                glitch_on = not glitch_on
+                print(f"[INFO] Glitch: {'on' if glitch_on else 'off'} ({glitch_fade:g}s fade)")
             elif cmd == "bg_reset" and bg_sender is not None:
                 # 사람이 없을 때 누르면 현재 프레임 전체를 배경으로 다시 잡는다.
                 bg_plate = None
@@ -1071,7 +1141,10 @@ def run_loop(
             elif cmd == "target_reset" and target_selector is not None:
                 target_selector.reset()
                 print(f"[INFO] Target: re-pick by mode '{target_selector.mode}'")
+            elif cmd.startswith("zoom_") and zoom_source is not None:
+                zoom_source.command(cmd)
         pending_cmds.clear()
+        _prof("preview")
         if quit_requested:
             print("[INFO] Quit requested")
             break
@@ -1098,6 +1171,8 @@ def run_loop(
             if distance_estimator is not None:
                 capture_note += (f" | dist={person_z:.2f}m src={distance_estimator.source}"
                                  if person_z_valid else " | dist=-")
+            if zoom is not None:
+                capture_note += (f" | zoom=x{zoom.scale:.2f}" if zoom.valid else " | zoom=-")
             if seg_worker is not None:
                 seg_boxes = seg_worker.state.get("boxes")
                 capture_note += (f" | people={0 if seg_boxes is None else len(seg_boxes)}"
@@ -1105,6 +1180,9 @@ def run_loop(
             print(f"[INFO] {W}x{H} long={cur_long} ds={_compute_ds_ratio(H,W,cur_long):.3f} "
                   f"target={tgtfps:.2f} actual={fps:.1f} | prep={prep_ms:.1f}ms "
                   f"infer={infer_ms:.1f}ms post={post_ms:.1f}ms{capture_note}", flush=True)
+            if profile and prof_sum:
+                print("[PROF] " + " ".join(f"{k}={v / frames:.1f}" for k, v in prof_sum.items()) + " (ms/frame, GPU sync)", flush=True)
+                prof_sum.clear()
             frames = 0; t0 = time.perf_counter()
 
         # ===== 타이밍 =====

@@ -15,10 +15,17 @@ def build_parser() -> argparse.ArgumentParser:
     "--ffmpeg-in",
     type=str,
     default="dshow",                 # 기본을 dshow로
-    choices=["decklink", "dshow"],   # ← dshow 추가
-    help="FFmpeg 입력 백엔드 선택 (decklink | dshow). 미지정 시 dshow(OBS 가상카메라 등)")
+    choices=["decklink", "dshow", "file", "sdk"],   # file: 영상 파일 실시간 재생(테스트용)
+    help="입력 백엔드 (decklink | dshow | file | sdk). sdk = DeckLink 드라이버 직접(ffmpeg 없음), "
+         "SDI 메타데이터(렌즈 줌)도 함께 받음. 미지정 시 dshow(OBS 가상카메라 등)")
+    g.add_argument("--sdi-deinterlace", type=str, default="adaptive", choices=["adaptive", "bob", "weave"],
+                   help="--ffmpeg-in sdk 인터레이스(1080i) 처리: adaptive=멈춘 곳은 1080줄 그대로, 움직인 곳만 보간(기본), "
+                        "bob=1필드만(540줄 2배), weave=두 필드 그대로(움직이면 빗살)")
+    g.add_argument("--input-file", type=str, default=None, help="--ffmpeg-in file 일 때 재생할 영상 파일")
+    g.add_argument("--input-loop", type=int, default=1, help="영상 파일 반복 재생(1/0)")
     g.add_argument("--ffmpeg-bin", type=str, default="ffmpeg", help="ffmpeg 실행 파일 경로")
-    g.add_argument("--decklink-device", type=str, default=None, help="DeckLink 장치명 (예: 'DeckLink Quad (1)')")
+    g.add_argument("--decklink-device", type=str, default=None,
+                   help="DeckLink 장치명 (예: 'DeckLink Quad (1)'). --ffmpeg-in sdk 에서는 번호 또는 이름 일부 (기본 0)")
     g.add_argument("--decklink-format", type=str, default=None, help="(옵션) DeckLink 입력 포맷 표시용")
     g.add_argument("--raw-format", type=str, default="bgr24",
                    choices=["bgr24", "bgra", "yuyv422", "uyvy422"],
@@ -59,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.set_defaults(no_preview=False)
     g.add_argument("--preview-scale", type=float, default=0.5, help="프리뷰 스케일 팩터")
     g.add_argument("--show-fps", type=int, default=1, help="FPS 로그 출력(1/0)")
+    g.add_argument("--profile", type=int, default=0,
+                   help="구간별 처리 시간(ms) 로그(1/0). 구간마다 GPU 동기화를 하므로 측정할 때만 사용")
     g.add_argument("--show-depth", type=int, default=0, help="프리뷰에 depth 미니맵 표시(1/0)")
 
     # OBS 출력
@@ -74,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--spout-invert", type=int, default=0, help="Spout 텍스처 상하 반전(1/0)")
     g.add_argument("--spout-mode", type=str, default="comp", choices=["comp", "matte"],
                    help="comp: 프리뷰와 같은 합성 화면 / matte: 사람 누끼만 RGBA(알파 포함)로 전송")
+    g.add_argument("--matte-color", type=str, default="source", choices=["source", "fgr"],
+                   help="matte 누끼의 색: source=원본 픽셀(화질 유지, 기본) / fgr=RVM 예측 전경색(이전 방식)")
     g.add_argument("--spout-bg", type=int, default=0, help="배경을 별도 Spout sender로 전송(1/0)")
     g.add_argument("--spout-bg-name", type=str, default="RVM_BG", help="배경 Spout sender 이름")
     g.add_argument("--spout-bg-mode", type=str, default="clean", choices=["clean", "raw"],
@@ -98,13 +109,31 @@ def build_parser() -> argparse.ArgumentParser:
     g = p.add_argument_group("Person Distance")
     g.add_argument("--person-distance", type=int, default=0, help="사람 거리 추정 사용(1/0), matte 모드 필요")
     g.add_argument("--dist-hfov", type=float, default=60.0, help="입력 카메라 가로 화각(도)")
+    g.add_argument("--dist-body", type=str, default="full", choices=["full", "upper"],
+                   help="몸 크기 기준: full=어깨-골반-무릎-발목 세로 길이(회전·팔 동작에 강함), upper=어깨폭/몸통(이전 방식)")
     g.add_argument("--dist-cam-height", type=float, default=None, help="카메라 높이(m). 미지정 시 자동 보정")
     g.add_argument("--dist-cam-pitch", type=float, default=None, help="카메라 아래 기울기(도). 미지정 시 자동 보정")
     g.add_argument("--dist-calib", type=str, default="ground_calib.json", help="자동 보정 결과 저장 파일")
     g.add_argument("--dist-pose-model", type=str, default="yolov8n-pose.pt", help="YOLO pose 가중치")
     g.add_argument("--dist-pose-imgsz", type=int, default=640, help="YOLO pose 추론 해상도")
-    g.add_argument("--logo-duration", type=float, default=4.0, help="L 키 로고 연출 길이(초)")
+    g.add_argument("--logo-duration", type=float, default=4.0, help="로고 연출 길이(초)")
     g.add_argument("--logo-every", type=float, default=0.0, help="이 간격(초)마다 로고 연출 자동 실행 (0=끔)")
+    g.add_argument("--glitch-fade", type=float, default=0.8, help="I 키 글리치가 켜지고 꺼지는 데 걸리는 시간(초)")
+    g.add_argument("--glitch-start", type=int, default=0, choices=[0, 1], help="1 = 글리치 켜진 상태로 시작 (I 키로 끔)")
+
+    # Zoom tracking (lens zoom → matte 좌상단 블록 5 → Unreal 카메라 화각, 거리 추정 초점거리)
+    g = p.add_argument_group("Zoom Tracking")
+    g.add_argument("--zoom-source", type=str, default="off", choices=["off", "freed", "manual", "replay", "sdi"],
+                   help="줌 값 출처: freed=FreeD UDP(렌즈 데이터 박스/시뮬레이터), manual=키보드(- = z), "
+                        "replay=프레임별 배율 CSV(--zoom-replay, 파일 입력 테스트용), "
+                        "sdi=SDI 메타데이터(--ffmpeg-in sdk 필요, 렌즈 JSON의 sdi 위치)")
+    g.add_argument("--zoom-replay", type=str, default=None,
+                   help="replay 소스 CSV (frame,scale). 생략하면 <input-file>.zoom.csv")
+    g.add_argument("--zoom-lens", type=str, default=None, help="렌즈 테이블 JSON (기본 lens/UA107x8.4_placeholder.json)")
+    g.add_argument("--zoom-delay-ms", type=float, default=0.0, help="영상이 렌즈 값보다 늦는 시간(ms). 실행 중 [ ] 로 조정")
+    g.add_argument("--zoom-extender", type=float, default=1.0, help="렌즈 익스텐더 배율 (1 또는 2). 실행 중 X 로 전환")
+    g.add_argument("--freed-port", type=int, default=40000, help="FreeD 수신 UDP 포트")
+    g.add_argument("--freed-camera-id", type=int, default=-1, help="이 카메라 ID만 사용 (-1=모두)")
 
     # Depth (MiDaS)
     g = p.add_argument_group("Depth (MiDaS)")
@@ -317,6 +346,9 @@ def args_to_run_kwargs(args) -> dict:
         ffmpeg_bin=args.ffmpeg_bin,
         decklink_device=args.decklink_device,
         decklink_format=args.decklink_format,
+        input_file=args.input_file,
+        input_loop=bool(args.input_loop),
+        sdi_deinterlace=args.sdi_deinterlace,
         raw_format=args.raw_format,
         dshow_name=args.dshow_name,
         force_size=args.force_size,
@@ -331,6 +363,7 @@ def args_to_run_kwargs(args) -> dict:
         device=args.device,
         fp16=args.fp16,
         show_fps=bool(args.show_fps),
+        profile=bool(args.profile),
         no_preview=args.no_preview,
         preview_scale=args.preview_scale,
         show_depth=bool(args.show_depth),
@@ -340,6 +373,7 @@ def args_to_run_kwargs(args) -> dict:
         spout_name=args.spout_name,
         spout_invert=bool(args.spout_invert),
         spout_mode=args.spout_mode,
+        matte_color=args.matte_color,
         spout_bg=bool(args.spout_bg),
         spout_bg_name=args.spout_bg_name,
         spout_bg_mode=args.spout_bg_mode,
@@ -355,6 +389,7 @@ def args_to_run_kwargs(args) -> dict:
         target_lock_ttl=args.target_lock_ttl,
         person_distance=bool(args.person_distance),
         dist_hfov=args.dist_hfov,
+        dist_body=args.dist_body,
         dist_cam_height=args.dist_cam_height,
         dist_cam_pitch=args.dist_cam_pitch,
         dist_calib=args.dist_calib,
@@ -362,6 +397,15 @@ def args_to_run_kwargs(args) -> dict:
         dist_pose_imgsz=args.dist_pose_imgsz,
         logo_duration=args.logo_duration,
         logo_every=args.logo_every,
+        glitch_fade=args.glitch_fade,
+        glitch_start=args.glitch_start,
+        zoom_source=args.zoom_source,
+        zoom_lens=args.zoom_lens,
+        zoom_replay=args.zoom_replay,
+        zoom_delay_ms=args.zoom_delay_ms,
+        zoom_extender=args.zoom_extender,
+        freed_port=args.freed_port,
+        freed_camera_id=args.freed_camera_id,
         use_depth=bool(args.use_depth),
         depth_model_name=args.depth_model_name,
         depth_long=args.depth_long,

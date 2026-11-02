@@ -106,7 +106,9 @@ def _open_ffmpeg_decklink_pipe(
     out_fps: str | float,
     raw_format: str = "bgr24",
     ffmpeg_bin: str = "ffmpeg",
-    decklink_format: Optional[str] = None,   # 예: '1080p5994', '1080i5994', '2160p2997'
+    decklink_format: Optional[str] = None,   # ffmpeg 형식 코드: 'Hp29', 'Hp59', 'Hi59' ... (-list_formats 1)
+    decimate_fps: Optional[str] = None,       # 입력보다 낮으면 ffmpeg에서 미리 프레임을 줄임 (예: Hp59 → 30000/1001)
+    queue_frames: int = 4,                    # DeckLink 내부 대기열 크기(프레임 수). 작을수록 지연이 쌓이지 않음
 ):
     """
     변경점:
@@ -130,6 +132,8 @@ def _open_ffmpeg_decklink_pipe(
     ]
     if decklink_format:
         cmd += ["-format_code", str(decklink_format)]
+    # 기본 대기열은 약 1 GB(1080p 4초 이상). 처리가 잠깐 밀리면 그만큼 지연이 쌓이므로 몇 프레임으로 제한한다.
+    cmd += ["-queue_size", str(max(2, int(queue_frames)) * reqW * reqH * 2)]
 
     cmd += [
         "-i", device_name,
@@ -139,8 +143,14 @@ def _open_ffmpeg_decklink_pipe(
     ]
 
     # 인터레이스이면 1프레임 디인터레이스(yadif=1). scale/format은 넣지 않음.
+    # 처리 FPS가 입력보다 낮으면 변환 전에 프레임을 줄여 CPU 변환·파이프 부담을 줄인다.
+    vf = []
     if _is_interlaced_code(decklink_format):
-        cmd += ["-vf", "yadif=1"]
+        vf.append("yadif=1")
+    if decimate_fps:
+        vf.append(f"fps={decimate_fps}")
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
 
     cmd += [
         "-vcodec", "rawvideo",
@@ -220,6 +230,41 @@ def _open_ffmpeg_dshow_pipe(
         raise RuntimeError("ffmpeg stdout pipe open failed")
 
     return proc, frame_bytes, reqW, reqH, pix_fmt
+
+def _probe_fps(ffmpeg_bin: str, path: str) -> Optional[str]:
+    probe = str(Path(ffmpeg_bin).with_name("ffprobe" + Path(ffmpeg_bin).suffix))
+    try:
+        out = subprocess.run([probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=r_frame_rate", "-of", "default=nw=1:nk=1", path],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _open_ffmpeg_file_pipe(path: str, out_size: Tuple[int, int], raw_format: str = "bgr24",
+                           ffmpeg_bin: str = "ffmpeg", loop: bool = True):
+    """Play a video file in real time (-re), looping, as rawvideo frames.
+
+    Frames come out in order with no drops inside ffmpeg, so frame k of the pipe is
+    frame (k mod N) of the file. The replay zoom source relies on that.
+    """
+    reqW, reqH = int(out_size[0]), int(out_size[1])
+    pix_fmt = _ffmpeg_pix_fmt(raw_format)
+    bpp = _bytes_per_px(pix_fmt)
+    cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin", "-re"]
+    if loop:
+        cmd += ["-stream_loop", "-1"]
+    cmd += ["-i", path, "-an", "-vf", f"scale={reqW}:{reqH}", "-fps_mode", "passthrough",
+            "-vcodec", "rawvideo", "-pix_fmt", pix_fmt, "-f", "rawvideo", "pipe:1"]
+    print("[INFO] Starting ffmpeg file pipe:")
+    print("  " + " ".join(shlex.quote(c) for c in cmd))
+    frame_bytes = reqW * reqH * bpp
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=frame_bytes * 2)
+    if proc.stdout is None:
+        raise RuntimeError("ffmpeg stdout pipe open failed")
+    return proc, frame_bytes, reqW, reqH, pix_fmt
+
 
 class _DeckLinkGrab:
     """
@@ -309,6 +354,7 @@ class _ThreadedGrabber:
         self.t: Optional[threading.Thread] = None
         self.frames_read = 0
         self.frames_dropped = 0
+        self.last_index = -1   # source frame index of the frame returned by the last read()
         self.last_error: Optional[BaseException] = None
     def start(self):
         self.alive = True
@@ -323,17 +369,18 @@ class _ThreadedGrabber:
                 break
             if not ok:
                 time.sleep(0.001); continue
+            idx = self.frames_read
             self.frames_read += 1
             if self.q.full():
                 try:
                     self.q.get_nowait()   # oldest-drop
                     self.frames_dropped += 1
                 except queue.Empty: pass
-            try: self.q.put_nowait(frm)
+            try: self.q.put_nowait((idx, frm))
             except queue.Full: pass
     def read(self, timeout=1.0):
         try:
-            frm = self.q.get(timeout=timeout); return True, frm
+            self.last_index, frm = self.q.get(timeout=timeout); return True, frm
         except queue.Empty:
             return False, None
     def release(self):
@@ -362,6 +409,10 @@ def create_input_source(
     ffmpeg_bin: str = "ffmpeg",
     decklink_device: Optional[str] = None,
     decklink_format: Optional[str] = None,     # '1080p5994' 등
+    input_file: Optional[str] = None,          # ffmpeg_in == "file"
+    input_loop: bool = True,
+    target_fps: Optional[str] = None,          # 처리 FPS. decklink 입력에서 이보다 빠른 신호는 ffmpeg에서 줄임
+    sdi_deinterlace: str = "adaptive",         # ffmpeg_in == "sdk", 인터레이스: adaptive | bob | weave
 ):
     """
     Returns:
@@ -377,6 +428,25 @@ def create_input_source(
       - (A-3) 정확한 바이트 읽기 적용
       - (D-3) oldest-drop 큐 정책 유지
     """
+    if ffmpeg_in == "sdk":
+        # DeckLink Desktop Video API directly: video + SDI ancillary packets (lens metadata) per frame.
+        from .decklink_sdk import DeckLinkSDKReader
+        # 처리 FPS(--target-fps, 없으면 --force-fps)보다 빠른 신호(59.94p)는 변환 전에 프레임을 줄인다
+        # (ffmpeg 경로의 fps 필터와 같은 역할). 신호 형식(i/p, 프레임레이트)은 자동 감지.
+        reader = DeckLinkSDKReader(decklink_device, deinterlace=sdi_deinterlace,
+                                   max_fps=parse_fps(target_fps or force_fps) if (target_fps or force_fps) else None)
+        grab = _ThreadedGrabber(reader, max_queue=1)
+        grab.reader = reader   # --zoom-source sdi looks up each frame's packets here
+        grab.start()
+        ok, frm = grab.read(timeout=5.0)
+        if not ok:
+            reader.release()
+            raise RuntimeError("프레임 읽기 실패 (DeckLink SDK): 신호·다른 프로그램(OBS 등) 사용 여부 확인")
+        H, W = frm.shape[:2]
+        print(f"[INFO] Using DeckLink SDK input: {reader.name} {reader.mode_name} {W}x{H} @ {reader.fps:.3f}"
+              f" -> {reader.out_fps:.3f} fps")
+        return grab, W, H, reader.out_fps
+
     ffmpeg_bin = resolve_ffmpeg_bin(ffmpeg_bin)
     print(f"[INFO] FFmpeg: {ffmpeg_bin}")
 
@@ -392,7 +462,8 @@ def create_input_source(
             raise AssertionError("DeckLink 입력은 --decklink-device, --force-size, --force-fps 필요")
         proc, frame_bytes, W, H, pix_fmt = _open_ffmpeg_decklink_pipe(
             decklink_device, (req_W, req_H), force_fps,
-            raw_format=raw_format, ffmpeg_bin=ffmpeg_bin, decklink_format=decklink_format
+            raw_format=raw_format, ffmpeg_bin=ffmpeg_bin, decklink_format=decklink_format,
+            decimate_fps=(str(target_fps) if target_fps and parse_fps(target_fps) < parse_fps(force_fps) - 0.01 else None),
         )
         grab = _ThreadedGrabber(_DeckLinkGrab(proc, frame_bytes, W, H, pix_fmt=pix_fmt), max_queue=1)
         grab.start()
@@ -404,6 +475,21 @@ def create_input_source(
         print(f"[INFO] Input size (first frame): {W}x{H}")
         obs_fps_from_input = parse_fps(force_fps)   # 입력 fps를 그대로 추천
         return grab, W, H, obs_fps_from_input
+
+    if ffmpeg_in == "file":
+        if not input_file or not Path(input_file).exists():
+            raise FileNotFoundError(f"--input-file not found: {input_file}")
+        proc, frame_bytes, W, H, pix_fmt = _open_ffmpeg_file_pipe(
+            str(input_file), (req_W, req_H), raw_format, ffmpeg_bin, loop=input_loop)
+        grab = _ThreadedGrabber(_DeckLinkGrab(proc, frame_bytes, W, H, pix_fmt=pix_fmt), max_queue=1)
+        grab.start()
+        ok, frm = grab.read(timeout=5.0)
+        if not ok:
+            raise RuntimeError("프레임 읽기 실패 (ffmpeg file)")
+        H, W = frm.shape[:2]
+        file_fps = _probe_fps(ffmpeg_bin, str(input_file)) or str(force_fps)
+        print(f"[INFO] Using file input: {input_file} ({W}x{H} @ {file_fps}, loop={input_loop})")
+        return grab, W, H, parse_fps(file_fps)
 
     if ffmpeg_in == "dshow":
         proc, frame_bytes, W, H, pix_fmt = _open_ffmpeg_dshow_pipe(

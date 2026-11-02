@@ -1,0 +1,24 @@
+1. 메타데이터가 들어오는지 확인
+C:\Users\admin\anaconda3\envs\RVM_4090_2\python.exe tools\sdi_anc_probe.py --watch 0x51:0x01
+
+2. 기록 (2분): 와이드 끝 → 텔레 끝 → 와이드 끝을 천천히 두 번 왕복합니다.
+
+C:\Users\admin\anaconda3\envs\RVM_4090_2\python.exe tools\sdi_anc_probe.py --watch 0x51:0x01 --record-video --seconds 120
+끝나면 로그 파일 이름(anc_logs\anc_<시각>.jsonl)이 출력됩니다.
+
+3. 영상과 비교
+
+C:\Users\admin\anaconda3\envs\RVM_4090_2\python.exe tools\anc_video_correlate.py anc_logs\anc_<시각>.jsonl
+4. 테이블 만들기: 렌즈 사양의 와이드·텔레 초점거리를 넣습니다. 예는 UA107x8.4입니다.
+
+C:\Users\admin\anaconda3\envs\RVM_4090_2\python.exe tools\make_lens_table.py anc_logs\anc_<시각>.jsonl --name UA107x8.4 --wide-mm 8.4 --tele-mm 900
+lens\UA107x8.4.json이 만들어지고, 다음 단계에 넣을 값이 그대로 출력됩니다.
+
+적용:
+  RVM     : --zoom-source sdi --zoom-lens lens\UA107x8.4.json --dist-hfov 59.4
+  Unreal  : ZoomCamera > Zoom > Wide Focal Length = 8.4
+
+테이블 적용 방법
+RVM: 실행 명령 뒤에 4단계에서 출력된 옵션을 붙입니다.
+
+run_rvm_30fps.cmd --ffmpeg-in sdk --force-fps 30000/1001 --zoom-source sdi --zoom-lens lens\UA107x8.4.json --dist-hfov 59.4
