@@ -1,0 +1,10 @@
+run_rvm_30fps.cmd --spout-target 1 --no-preview --energy-blur 10 --target-seg-imgsz 480 --long 768
+
+(base) C:\Users\admin>"C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe" "D:\body tracking\Unreal\Matte_2P_v2\Matte_2P_v2.uproject" Main -game -windowed -ResX=1920 -ResY=1080 -log -dpcvars=r.OneFrameThreadLag=0,r.AntiAliasingMethod=0,r.ScreenPercentage=100,r.MotionBlurQuality=0
+
+"C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe" "D:\body tracking\Unreal\Matte_Zoom\Matte_Zoom.uproject" Zoom_Stage -game -windowed -ResX=1920 -ResY=1080 -log -dpcvars=r.OneFrameThreadLag=0,r.AntiAliasingMethod=0,r.ScreenPercentage=100,r.MotionBlurQuality=0
+
+run_rvm_30fps.cmd --ffmpeg-in decklink --ffmpeg-bin "D:\FFmpeg000\ffmpeg.exe" --decklink-device "DeckLink 4K Extreme 12G" --decklink-format Hp59 --spout-target 1 --energy 0 --target-seg-imgsz 480 --long 768 --target-fps 30000/1001 --no-preview
+
+
+run_rvm_30fps.cmd --spout-target 1 --energy 0 --target-seg-imgsz 480 --long 768 --no-preview --dshow-name "Decklink Video Capture" 
